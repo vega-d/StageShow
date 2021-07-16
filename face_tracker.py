@@ -17,21 +17,28 @@ def argsParser():
                     help="path to Caffe 'deploy' prototxt file", default="./model/deploy.prototxt")
     ap.add_argument("-m", "--model", required=False,
                     help="path to Caffe pre-trained model", default="./model/res10_300x300_ssd_iter_140000.caffemodel")
-    ap.add_argument("-c", "--confidence", type=float, default=0.9,
-                    help="minimum probability to filter weak detections. Default is 0.9")
+    ap.add_argument("-c", "--confidence", type=float, default=0.8,
+                    help="minimum probability to filter weak detections. Default is 0.8")
+    ap.add_argument("-t", "--precision", type=float, default=0.8,
+                    help="How close to center of frame face should be? 0.1-0.9, Bigger number is closer to center. Default is 0.8")
     ap.add_argument("-a", "--anonymous", type=bool, default=0,
                     help="enable blanking out detected faces to avoid flashing your face.")
     ap.add_argument("-vh", "--visor_height", type=int, default=500,
                     help="Height in pixels for resolution in which webcam will be processed. Default is 500")
-    ap.add_argument("-oh", "--output_height", type=bool, default=360,
+    ap.add_argument("-oh", "--output_height", type=int, default=360,
                     help="Height in pixels for resolution which will be used for output. Default is 360")
-    ap.add_argument("-ow", "--output_width", type=bool, default=640,
+    ap.add_argument("-ow", "--output_width", type=int, default=640,
                     help="Width in pixels for resolution which will be used for output. Default is 640")
     ap.add_argument("--debug", help="Enable debug mode.", action="store_true", default=False)
 
     args = vars(ap.parse_args())
 
     return args
+
+
+def distance_from(point1, point2):
+    w_diff, h_diff = abs(point2[0] - point1[0]), abs(point2[1] - point1[1])
+    return np.sqrt(w_diff ** 2 + h_diff ** 2)
 
 
 def run_face_tracker(args):
@@ -62,18 +69,21 @@ def run_face_tracker(args):
     debug = args["debug"]
     resize = args["visor_height"]
     imagemagicsize = [args["output_width"], args["output_height"]]
-
+    tolerance = float(args["precision"] / 2)
     cam = pyvirtualcam.Camera(width=imagemagicsize[0], height=imagemagicsize[1], fps=60)
     print("[INFO] Output virtual webcam is:", cam.device)
     print("[INFO] To test view the output execute: ffplay" + cam.device)
     print("[INFO] Anonymous mode is", "on" if anon else "off")
     print("[INFO] Debug mode is", "on" if debug else "off")
 
+    screenboxX, screenboxY = width // 2, height // 2
+
     # loop over the frames from the video stream
     while True:
         # read the next frame from the video stream and resize it
         frame = vs.read()[1]
         frame = imutils.resize(frame, height=resize)
+        debug_frame = frame[:]
 
         # if the frame dimensions are None, grab them
         if W is None or H is None:
@@ -102,7 +112,8 @@ def run_face_tracker(args):
                 (startX, startY, endX, endY) = box.astype("int")
 
                 if anon:
-                    points = np.array([[startX - 20, startY - 20], [endX + 20, startY - 20], [endX + 20, endY + 20], [startX - 20, endY + 20]], dtype=np.int32)
+                    points = np.array([[startX - 20, startY - 20], [endX + 20, startY - 20], [endX + 20, endY + 20],
+                                       [startX - 20, endY + 20]], dtype=np.int32)
                     cv2.fillPoly(frame, [points], (0, 0, 0))
 
         # update our centroid tracker using the computed set of bounding
@@ -114,25 +125,59 @@ def run_face_tracker(args):
 
             objectID, centroid = tracking_object
 
-            valX = centroid[0] - int(imagemagicsize[0] * 0.5)
-            valY = centroid[1] - int(imagemagicsize[1] * 0.5)
-
             if anon:
-                cv2.putText(frame, "anonymous mode on", (centroid[0] - 85, centroid[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                cv2.putText(frame, "anonymous mode on", (centroid[0] - 85, centroid[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                            (255, 255, 255), 2)
 
-            screenboxX, screenboxY = min(max(valX, 0), W - imagemagicsize[0]), min(max(valY, 0),
-                                                                                   H - imagemagicsize[1])
-            frame = frame[screenboxY:screenboxY + imagemagicsize[1], screenboxX:screenboxX + imagemagicsize[0]]
+            speed = int(distance_from(centroid,
+                                      (screenboxX + imagemagicsize[0] // 2, screenboxY + imagemagicsize[1] // 2)) // 30)
+            # speed = 10
 
+            if centroid[0] < (screenboxX + int(imagemagicsize[0] * tolerance)):
+                screenboxX -= speed
+            if centroid[0] > (screenboxX + int(imagemagicsize[0] * (1 - tolerance))):
+                screenboxX += speed
 
+            if centroid[1] < (screenboxY + int(imagemagicsize[1] * tolerance)):
+                screenboxY -= speed
+            if centroid[1] > (screenboxY + int(imagemagicsize[1] * (1 - tolerance))):
+                screenboxY += speed
+
+            # print(speed, screenboxX, screenboxY)
+
+            if debug:
+                cv2.rectangle(frame, (startX, startY), (endX, endY), (255, 0, 0), 2)
+
+                text1 = str(imagemagicsize)
+                cv2.putText(frame, text1, (screenboxX + 20, screenboxY + 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                            (255, 255, 255), 2)
+
+                cv2.rectangle(frame, (
+                    screenboxX + int(imagemagicsize[0] * tolerance), int(screenboxY + imagemagicsize[1] * tolerance)),
+                              (screenboxX + int(imagemagicsize[0] * (1 - tolerance)),
+                               screenboxY + int(imagemagicsize[1] * (1 - tolerance))), (255, 0, 255), 2)
+
+                text = ("occ: " + str(debug))
+                cv2.putText(frame, text, (screenboxX + 20, screenboxY + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                            (255, 255, 255), 2)
+
+            screenboxX, screenboxY = min(max(screenboxX, 0), W - imagemagicsize[0]), min(max(screenboxY, 0),
+                                                                                         H - imagemagicsize[1])
+
+            if debug:
+                debug_frame = frame[:]
+                cv2.rectangle(debug_frame, (screenboxX, screenboxY),
+                              (screenboxX + imagemagicsize[0], screenboxY + imagemagicsize[1]), (0, 0, 255), 2)
         else:
-            frame = frame[0:imagemagicsize[1], 0:imagemagicsize[0]]
+            # frame = frame[0:imagemagicsize[1], 0:imagemagicsize[0]]
             text = "No face found !"
-            cv2.putText(frame, text, (20, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-
+            cv2.putText(frame, text, (screenboxX + 20, screenboxY + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255),
+                        2)
+        frame = frame[screenboxY:screenboxY + imagemagicsize[1], screenboxX:screenboxX + imagemagicsize[0]]
         if debug:
-            cv2.imshow(cam.device, frame)
+            cv2.imshow(cam.device, debug_frame)
 
+        frame = imutils.resize(frame, width=args["output_width"], height=args["output_height"])
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         cam.send(frame)
 
