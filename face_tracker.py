@@ -1,6 +1,9 @@
 # Copyright https://github/vega-d 2021
 # import the necessary packages
-from centroidtracker import CentroidTracker
+import os
+import warnings
+
+from centroidtracker import *
 from imutils.video import VideoStream
 import numpy as np
 import argparse
@@ -8,6 +11,8 @@ import imutils
 import time
 import cv2
 import pyvirtualcam
+from subprocess import check_output
+from contextlib import redirect_stdout
 
 
 def argsParser():
@@ -29,6 +34,8 @@ def argsParser():
                     help="Height in pixels for resolution which will be used for output. Default is 360")
     ap.add_argument("-ow", "--output_width", type=int, default=854,
                     help="Width in pixels for resolution which will be used for output. Default is 640")
+    ap.add_argument("-cm", "--camera", type=str, default="None",
+                    help="Camera you want to use. Input like so: --cm /dev/video2 or --camera video2 or --cm 2")
     ap.add_argument("--debug", help="Enable debug mode.", action="store_true", default=False)
 
     args = vars(ap.parse_args())
@@ -50,13 +57,34 @@ def run_face_tracker(args):
     print("[INFO] loading model...")
     net = cv2.dnn.readNetFromCaffe(args["prototxt"], args["model"])
 
+    print("[INFO] Detecting cameras...")
+
+    dev_list = str(check_output(["ls", "/dev"])).split(r"\n")
+    video_devices = []
+    for i in dev_list:
+        if i[:5] == "video":
+            if check_cam(i):
+                video_devices.append(i)
+    print("[INFO] Detected cameras:", video_devices)
+
+    if args["camera"] == "None":
+        if len(video_devices) > 1:
+            print("[Warning] You appear to have more than one camera available, but /dev/" + str(video_devices[0]),
+                  "will be used. To change that, use --camera argument. Use --help to learn more.")
+        video_device = int(video_devices[0][-1])
+    else:
+        if check_cam(args["camera"]):
+            video_device = int(args["camera"][-1])
+        else:
+            print("[FATAL] Camera you privded with --camera does not work!")
+            exit(0)
     # initialize the video stream and allow the camera sensor to warmup
-    print("[INFO] starting video stream...")
+    print("[INFO] starting video stream from camera /dev/video" + str(video_device))
     HIGH_VALUE = 10000
     WIDTH = HIGH_VALUE
     HEIGHT = HIGH_VALUE
 
-    vs = cv2.VideoCapture(0)
+    vs = cv2.VideoCapture(video_device)
     fourcc = cv2.VideoWriter_fourcc(*'XVID')
     vs.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
     vs.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
@@ -79,7 +107,7 @@ def run_face_tracker(args):
     print("[INFO] Debug mode is", "on" if debug else "off")
     print("[INFO] process to render quality coefficient is", process2render_coefficient)
 
-    screenboxX, screenboxY = width // 2 - imagemagicsize[0] // 2, height // 2 - imagemagicsize[1] // 2
+    screenboxX, screenboxY = imagemagicsize[0], imagemagicsize[1]
 
     # loop over the frames from the video stream
     while True:
@@ -89,7 +117,6 @@ def run_face_tracker(args):
         detect_frame = imutils.resize(detect_frame, height=resize)
         if debug:
             debug_frame = detect_frame[:]
-
 
         # if the frame dimensions are None, grab them
         if W is None or H is None:
@@ -117,11 +144,6 @@ def run_face_tracker(args):
                 # visualize it
                 (startX, startY, endX, endY) = box.astype("int")
 
-                if anon:
-                    points = np.array([[startX - 20, startY - 20], [endX + 20, startY - 20], [endX + 20, endY + 20],
-                                       [startX - 20, endY + 20]], dtype=np.int32)
-                    cv2.fillPoly(detect_frame, [points], (0, 0, 0))
-
         # update our centroid tracker using the computed set of bounding
         # box rectangles
         objects = list(ct.update(rects).items())
@@ -132,7 +154,17 @@ def run_face_tracker(args):
             objectID, centroid = tracking_object
 
             if anon:
-                cv2.putText(detect_frame, "anonymous mode on", (centroid[0] - 85, centroid[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                if anon:
+                    points = np.array(
+                        [[int(startX / process2render_coefficient) - 20, int(startY / process2render_coefficient) - 20],
+                         [int(endX / process2render_coefficient) + 20, int(startY / process2render_coefficient) - 20],
+                         [int(endX / process2render_coefficient) + 20, int(endY / process2render_coefficient) + 20],
+                         [int(startX / process2render_coefficient) - 20, int(endY / process2render_coefficient) + 20]],
+                        dtype=np.int32)
+                    cv2.fillPoly(render_frame, [points], (0, 0, 0))
+                cv2.putText(render_frame, "anonymous mode on", (
+                int(centroid[0] / process2render_coefficient) - 85, int(centroid[1] / process2render_coefficient)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                             (255, 255, 255), 2)
 
             speed = int(distance_from(centroid,
@@ -148,8 +180,6 @@ def run_face_tracker(args):
                 screenboxY -= speed
             if centroid[1] > (screenboxY + int(imagemagicsize[1] * (1 - tolerance))):
                 screenboxY += speed
-
-            # print(speed, screenboxX, screenboxY)
 
             if debug:
                 cv2.rectangle(detect_frame, (startX, startY), (endX, endY), (255, 0, 0), 2)
@@ -171,24 +201,24 @@ def run_face_tracker(args):
                                                                                          H - imagemagicsize[1])
 
             if debug:
-                # debug_frame = detect_frame[:]
                 cv2.rectangle(debug_frame, (screenboxX, screenboxY),
                               (screenboxX + imagemagicsize[0], screenboxY + imagemagicsize[1]), (0, 0, 255), 2)
         else:
-            # frame = frame[0:imagemagicsize[1], 0:imagemagicsize[0]]
             text = "No face found !"
-            cv2.putText(detect_frame, text, (screenboxX + 20, screenboxY + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+            cv2.putText(render_frame, text, (int(screenboxX / process2render_coefficient) + 20,
+                                             int(screenboxY / process2render_coefficient) + 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (255, 255, 255), 2)
 
         renderX, renderY = int(screenboxX / process2render_coefficient), int(screenboxY / process2render_coefficient)
-
-        render_frame = render_frame[renderY:renderY + renderframe_size[1], renderX:renderX + renderframe_size[0]]
+        rendered_frame = render_frame[renderY:renderY + renderframe_size[1], renderX:renderX + renderframe_size[0]]
         if debug:
             cv2.imshow(cam.device, debug_frame)
-
-        # render_frame = render_frame[0:renderframe_size[1], 0:renderframe_size[0]]
-        render_frame = imutils.resize(render_frame, height=args["output_height"], width=args["output_width"])
-        render_frame = cv2.cvtColor(render_frame, cv2.COLOR_RGB2BGR)
-        cam.send(render_frame)
+        if rendered_frame.shape != (args["output_height"], args["output_width"], 3):
+            rendered_frame = imutils.resize(rendered_frame, height=args["output_height"] + 1)
+        rendered_frame = rendered_frame[0:renderframe_size[1], 0:renderframe_size[0]]
+        rendered_frame = cv2.cvtColor(rendered_frame, cv2.COLOR_RGB2BGR)
+        cam.send(rendered_frame)
 
         cam.sleep_until_next_frame()
         key = cv2.waitKey(1) & 0xFF

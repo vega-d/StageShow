@@ -9,7 +9,7 @@ if [ $1 == "--setup" ]; then
 else
   echo "[INFO] Loading in virtual webcam drivers..."
   sudo modprobe -r v4l2loopback
-  sudo modprobe v4l2loopback card_label="Dummy Camera" video_nr=2 exclusive_caps=1
+  sudo modprobe v4l2loopback exclusive_caps=1
   echo "[INFO] Loaded in virtual webcam drivers!"
   python3 face_tracker.py $@
 fi
